@@ -1,9 +1,11 @@
 package kvsrv
 
-import "6.5840/labrpc"
-import "crypto/rand"
-import "math/big"
+import (
+	"crypto/rand"
+	"math/big"
 
+	"6.5840/labrpc"
+)
 
 type Clerk struct {
 	server *labrpc.ClientEnd
@@ -35,9 +37,15 @@ func MakeClerk(server *labrpc.ClientEnd) *Clerk {
 // must match the declared types of the RPC handler function's
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) Get(key string) string {
-
-	// You will have to modify this function.
-	return ""
+	// 创建GetArgs
+	args := GetArgs{Key: key}
+	// 创建GetReply
+	reply := GetReply{Value: ""}
+	// 发送RPC请求，直到成功
+	for !ck.server.Call("KVServer.Get", &args, &reply) {
+	}
+	// 返回获取到的value
+	return reply.Value
 }
 
 // shared by Put and Append.
@@ -50,7 +58,29 @@ func (ck *Clerk) Get(key string) string {
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) PutAppend(key string, value string, op string) string {
 	// You will have to modify this function.
-	return ""
+	// 创建PutAppendArgs
+	// args := PutAppendArgs{Key: key, Value: value}
+	// 修改请求
+	args := PutAppendArgs{
+		Key:         key,
+		Value:       value,
+		RequestId:   nrand(),
+		RequestType: Modify,
+	}
+	// 创建PutAppendReply
+	reply := PutAppendReply{Value: ""}
+	// 发送修改RPC请求，直到成功
+	for !ck.server.Call("KVServer."+op, &args, &reply) {
+	}
+	// 报告请求，定义新参不然会报labgob warning: Decoding into a non-default variable/field Value may not work
+	reportArgs := args
+	reportArgs.RequestType = Report
+	reportReply := PutAppendReply{Value: ""}
+	// 发送报告RPC请求，直到成功
+	for !ck.server.Call("KVServer."+op, &reportArgs, &reportReply) {
+	}
+	// 返回获取到的value
+	return reply.Value
 }
 
 func (ck *Clerk) Put(key string, value string) {

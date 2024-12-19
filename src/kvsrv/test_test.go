@@ -464,7 +464,6 @@ func TestMemPutManyClients(t *testing.T) {
 		NCLIENT = 100_000
 		MEM     = 1000
 	)
-
 	cfg := make_config(t, false)
 	defer cfg.cleanup()
 
@@ -490,7 +489,6 @@ func TestMemPutManyClients(t *testing.T) {
 	for i := 0; i < NCLIENT; i++ {
 		cks[i].Put("k", v)
 	}
-
 	runtime.GC()
 	time.Sleep(1 * time.Second)
 	runtime.GC()
