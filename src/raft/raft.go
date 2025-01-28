@@ -65,8 +65,11 @@ type Raft struct {
 	votedFor    int // 投票给谁，一个任期内，节点只能将选票投给某一个节点，所以当节点任期更新时将投票重置为-1
 	state       int // 状态
 	// 收到 RequestVote RPC 和 AppendEntries RPC都要重置选举超时计时器
-	electionTimer  *time.Ticker // 选举超时计时器（每个都有）
-	heartbeatTimer *time.Ticker // 心跳计时器（只有leader有）
+	electionTimer  *time.Timer // 选举超时计时器（每个都有）
+	heartbeatTimer *time.Ticker // 心跳定时器（只有leader有）
+
+	// 3B
+	
 }
 
 // 状态
@@ -496,7 +499,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		currentTerm:   0,
 		votedFor:      -1,
 		state:         Follower,
-		electionTimer: time.NewTicker(randomElectionTimeout()),
+		electionTimer: time.NewTimer(randomElectionTimeout()),
 	}
 
 	// 从崩溃前的状态初始化
