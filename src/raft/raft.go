@@ -65,11 +65,24 @@ type Raft struct {
 	votedFor    int // 投票给谁，一个任期内，节点只能将选票投给某一个节点，所以当节点任期更新时将投票重置为-1
 	state       int // 状态
 	// 收到 RequestVote RPC 和 AppendEntries RPC都要重置选举超时计时器
-	electionTimer  *time.Timer // 选举超时计时器（每个都有）
+	electionTimer  *time.Timer  // 选举超时计时器（每个都有）
 	heartbeatTimer *time.Ticker // 心跳定时器（只有leader有）
 
 	// 3B
-	
+	logs []LogEntry // 日志
+	// 所有机器
+	commitIndex int //已知已提交的日志条目的最高索引值（初始值为 0，单调递增）
+	lastApplied int //已应用到状态机的日志条目的最高索引值（初始值为 0，单调递增）
+	// 当节点发现 commitIndex > lastApplied 时，代表着 commitIndex 和 lastApplied 间的 entries 处于已提交，未应用的状态。因此应将其间的 entries 按序应用至状态机。
+	// leader
+	nextIndex  []int //针对每个服务器，记录要发送给该服务器的下一个日志条目的索引值（初始化为leader最后一个日志条目的索引值 +1）
+	matchIndex []int //针对每个服务器，记录已知已复制到该服务器的日志条目的最高索引值（初始值为 0，单调递增）
+}
+
+// LogEntry
+type LogEntry struct {
+	Term int         // 从 leader 接受到日志的任期(索引初始化为 1)
+	Cmd  interface{} // 待施加至状态机的命令
 }
 
 // 状态
@@ -153,6 +166,9 @@ type RequestVoteArgs struct {
 	// Your data here (3A, 3B).
 	Term        int // Candidate 任期
 	CandidateId int // Candidate id
+	// 3B
+	LastLogIndex int // Candidate 最后一条日志的索引，是投票的额外判据
+	LastLogTerm  int // Candidate 最后一条日志的任期
 }
 
 // example RequestVote RPC reply structure.
@@ -244,6 +260,10 @@ type AppendEntriesArgs struct {
 	LeaderId int // leader的id
 	//Client 可能将请求发送至 Follower 节点，得知 leaderId 后 Follower 可将 Client 的请求重定位至 Leader 节点。
 	//因为 Raft 的请求信息必须先经过 Leader 节点，再由 Leader 节点流向其他节点进行同步，信息是单向流动的。在选主过程中，leaderId暂时只有 debug 的作用。
+	PrevLogIndex int        // 前一条日志的索引
+	PrevLogTerm  int        // 前一条日志的任期
+	Entries      []LogEntry // 待复制的日志（若为空则是一次心跳）
+	LeaderCommit int        // leader的commitIndex，帮助 Follower 更新自身的 commitIndex
 }
 
 // AppendEntries RPC reply
@@ -496,10 +516,18 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		me:        me,
 		dead:      0,
 
+		// 3A
 		currentTerm:   0,
 		votedFor:      -1,
 		state:         Follower,
 		electionTimer: time.NewTimer(randomElectionTimeout()),
+
+		// 3B
+		logs:        []LogEntry{{0, nil}},
+		commitIndex: 0,
+		lastApplied: 0,
+		nextIndex:   nil,
+		matchIndex:  nil,
 	}
 
 	// 从崩溃前的状态初始化
