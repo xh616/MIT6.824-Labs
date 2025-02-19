@@ -1,10 +1,11 @@
 package raft
 
 import (
-	"6.5840/labrpc"
 	"math/rand"
 	"sync"
 	"time"
+
+	"6.5840/labrpc"
 )
 
 // as each Raft peer becomes aware that successive log entries are
@@ -44,8 +45,8 @@ type Raft struct {
 	votedFor    int // 投票给谁，一个任期内，节点只能将选票投给某一个节点，所以当节点任期更新时将投票重置为-1
 	state       int // 状态
 	// 收到 RequestVote RPC 和 AppendEntries RPC都要重置选举超时计时器
-	electionTimer  *time.Timer  // 选举超时计时器（每个都有）
-	heartbeatTimer *time.Ticker // 心跳定时器（只有leader有）
+	electionTimer   *time.Timer  // 选举超时计时器（每个都有）
+	heartbeatTicker *time.Ticker // 心跳定时器（只有leader有）
 
 	// 3B
 	logs []LogEntry // 日志
@@ -56,14 +57,15 @@ type Raft struct {
 	// leader
 	nextIndex  []int //针对每个服务器，记录要发送给该服务器的下一个日志条目的索引值（初始化为leader最后一个日志条目的索引值 +1）
 	matchIndex []int //针对每个服务器，记录已知已复制到该服务器的日志条目的最高索引值（初始值为 0，单调递增）
-
-	// 3C
-	lastIncludedIndex int    // 快照的最后一个日志条目索引
+	// 不能简单地认为 matchIndex = nextIndex - 1，当有节点宕机时，nextIndex 会大于 matchIndex
+	cond         *sync.Cond    // 用于通知其他 goroutine的条件变量
+	applyMsg     chan ApplyMsg // 已提交日志需要被应用到状态机里
+	addLogSignal chan struct{} // 提醒leader新增log的信号，通过给channel传一个struct{}{}即可唤醒
 }
 
 // LogEntry
 type LogEntry struct {
-	Term int         // 从 leader 接受到日志的任期(索引初始化为 1)
+	Term int         // 从 leader 接受到日志的任期
 	Cmd  interface{} // 待施加至状态机的命令
 }
 
@@ -74,8 +76,12 @@ const (
 	Leader
 )
 
+const noVote = -1
+
 // 广播心跳时间(broadcastTime)<<选举超时时间
-const HeartBeatTimeout = 50 * time.Millisecond
+func HeartBeatTimeout() time.Duration {
+	return 50 * time.Millisecond
+}
 
 // 随机超时选举时间生成（150ms-300ms）
 func randomElectionTimeout() time.Duration {
@@ -138,24 +144,30 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		dead:      0,
 
 		// 3A
-		currentTerm:   0,
-		votedFor:      -1,
-		state:         Follower,
-		electionTimer: time.NewTimer(randomElectionTimeout()),
+		currentTerm:     0,
+		votedFor:        noVote,
+		state:           Follower,
+		electionTimer:   time.NewTimer(randomElectionTimeout()),
+		heartbeatTicker: time.NewTicker(HeartBeatTimeout()),
 
 		// 3B
-		logs:        []LogEntry{{0, nil}},
-		commitIndex: 0,
-		lastApplied: 0,
-		nextIndex:   nil,
-		matchIndex:  nil,
+		logs:         make([]LogEntry, 1), // 索引0的日志置为空，因为需要记录前一个日志信息
+		commitIndex:  0,
+		lastApplied:  0,
+		nextIndex:    make([]int, len(peers)),
+		matchIndex:   make([]int, len(peers)),
+		applyMsg:     applyCh,
+		addLogSignal: make(chan struct{}),
 	}
-
+	// 初始化条件变量，控制applier协程和其他协程之间的通信
+	rf.cond = sync.NewCond(&rf.mu)
 	// 从崩溃前的状态初始化
 	rf.readPersist(persister.ReadRaftState())
 
-	// 启动 ticker goroutine 来监听选举超时定时器，开始选举
-	go rf.ticker()
+	go rf.ticker()         // 启动 ticker goroutine 来监听选举超时定时器，开始选举
+	go rf.heartbeatEvent() // 启动心跳 goroutine 来监听心跳定时器，发送心跳（日志复制在心跳RPC中实现）
+	go rf.AddLogEvent()    // 启动 AddLogEvent goroutine 来监听 addLog 事件，发送日志复制请求
+	go rf.applierEvent()   // 启动状态机应用日志的 goroutine
 
 	return rf
 }
