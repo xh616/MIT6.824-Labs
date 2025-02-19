@@ -285,8 +285,6 @@ func (rf *Raft) startElection() { //选举已在锁中，无需继续内部加�
 					voteGrantedCnt++
 				}
 				if voteGrantedCnt > len(rf.peers)/2 {
-					// 如果我还是Candidate
-
 					rf.state = Leader
 					// Leader上的易失性状态，选举后可能换leader需要重新初始化
 					rf.initializeLeaderEasilyLostState()
@@ -413,12 +411,6 @@ func (rf *Raft) applierEvent() {
 		rf.mu.Unlock()
 		Debug(dLog2, "S%d need apply msg{%+v}", rf.me, msgs)
 		for _, msg := range msgs {
-			rf.mu.Lock()
-			if msg.CommandIndex != rf.lastApplied+1 /*下一个apply的log一定是lastApplied+1，否则就是被快照按照替代了*/ {
-				rf.mu.Unlock()
-				continue
-			}
-			rf.mu.Unlock()
 			rf.applyMsg <- msg
 			rf.mu.Lock()
 			rf.lastApplied = max(msg.CommandIndex, rf.lastApplied)
