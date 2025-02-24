@@ -78,7 +78,7 @@ const (
 
 const noVote = -1
 
-// 广播心跳时间(broadcastTime)<<选举超时时间
+// 广播心跳时间<<选举超时时间
 func HeartBeatTimeout() time.Duration {
 	return 50 * time.Millisecond
 }
@@ -124,6 +124,18 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term    int  // 此节点的任期。假如 Leader 发现 Follower 的任期高于自己，则会放弃 Leader 身份并更新自己的任期。
 	Success bool // 此节点是否认同leader的心跳
+ 
+	// 一旦Follower进行日志一致性检测发现不一致之后，在响应 leader 请求中包含自己在这个任期存储的第一条日志。
+	XTerm  int //Follower发现与leader日志不一致时的任期（如果存在的话）
+	XIndex int //具有该任期的第一个日志的索引（如果存在的话）
+	XLen   int //日志长度
+}
+
+// PersistentStatus 持久化状态
+type PersistentStatus struct {
+	Logs        []LogEntry
+	CurrentTerm int
+	VotedFor    int
 }
 
 // the service or tester wants to create a Raft server. the ports

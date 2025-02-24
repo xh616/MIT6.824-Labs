@@ -18,8 +18,10 @@ package raft
 //
 
 import (
+	"bytes"
 	"sync/atomic"
-	//	"6.5840/labgob"
+
+	"6.5840/labgob"
 	// "6.5840/labrpc"
 )
 
@@ -52,13 +54,45 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// raftstate := w.Bytes()
 	// rf.persister.Save(raftstate, nil)
+	defer func() {
+		Debug(dPersist, "S%d persisted status{currentTerm:%d,log_len:%d,commitIndex:%d,appliedIndex:%d}",
+			rf.me, rf.currentTerm, len(rf.logs)-1, rf.commitIndex, rf.lastApplied)
+	}()
+	// 创建一个新的缓冲区，用来存储序列化的数据
+	w := new(bytes.Buffer)
+
+	// 创建一个 labgob 编码器，用来将数据编码到缓冲区
+	e := labgob.NewEncoder(w)
+
+	// 将当前任期、投票对象和日志条目进行编码
+	status := &PersistentStatus{
+		Logs:        rf.logs,
+		CurrentTerm: rf.currentTerm,
+		VotedFor:    rf.votedFor,
+	}
+	if err := e.Encode(status); err != nil {
+		Debug(dError, "persist encode err:%v", err)
+		return
+	}
+
+	// 将缓冲区中的数据转换为字节切片
+	data := w.Bytes()
+
+	// 将序列化的数据保存到持久化存储
+	rf.persister.Save(data, nil)
 }
 
 // restore previously persisted state.
 func (rf *Raft) readPersist(data []byte) {
-	if data == nil || len(data) < 1 { // bootstrap without any state?
+	if len(data) < 1 { // bootstrap without any state?
 		return
 	}
+
+	defer func() {
+		Debug(dPersist, "after read persist, S%d recover to status{currentTerm:%d,commitIndex:%d,applied:%d,log_len:%d}",
+			rf.me, rf.currentTerm, rf.commitIndex, rf.lastApplied, len(rf.logs)-1)
+	}()
+
 	// Your code here (3C).
 	// Example:
 	// r := bytes.NewBuffer(data)
@@ -72,6 +106,23 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+	// 创建一个新的缓冲区，读取传入的字节数据
+	r := bytes.NewBuffer(data)
+
+	// 创建一个 labgob 解码器，用来从缓冲区读取数据
+	d := labgob.NewDecoder(r)
+
+	// 用于存储解码后的数据
+	persistentStatus := &PersistentStatus{}
+	if err := d.Decode(persistentStatus); err != nil {
+		Debug(dError, "readPersist decode err:%v", err)
+		return
+	}
+
+	// 如果解码成功，将解码后的值赋给 Raft 服务器的状态
+	rf.currentTerm = persistentStatus.CurrentTerm
+	rf.votedFor = persistentStatus.CurrentTerm
+	rf.logs = persistentStatus.Logs
 }
 
 // the service says it has created a snapshot that has
@@ -105,6 +156,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGranted = false
 		return
 	}
+
+	defer rf.persist() // 持久化
 
 	// 如果Candidate任期大于我的任期，则更新我的任期并重置我的投票，并转为Follower
 	if args.Term > rf.currentTerm {
@@ -183,6 +236,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 
+	defer rf.persist() // 持久化
+
 	//正常收到心跳就变为Follower并刷新选举超时计时器
 	rf.state = Follower
 	rf.electionTimer.Reset(randomElectionTimeout())
@@ -193,9 +248,30 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.votedFor = noVote
 	}
 
-	// 如果我宕机，落后了leader很多日志，拒绝leader的日志复制
-	// 或者该条目的任期在 prevLogIndex 上不能和 prevLogTerm 匹配上，则返回false
-	if len(rf.logs) <= args.PrevLogIndex || rf.logs[args.PrevLogIndex].Term != args.PrevLogTerm {
+	// 如果我宕机，落后了leader很多日志
+	if len(rf.logs) <= args.PrevLogIndex {
+		//这种情况下，该raft实例断网一段时间过后，日志落后。所以直接返回 XLen即可。
+		//leader更新nextIndex为XLen即可，表示当前raft实例缺少XLen及后面的日志，leader在下次广播时带上这些日志
+		// leader   0{0} 1{101 102 103} 5{104}	PrevLogIndex=3	nextIndex=4
+		// follower 0{0} 1{101 102 103} 5{104}  PrevLogIndex=3  nextIndex=4
+		// follower 0{0} 1{101} 5 				PrevLogIndex=1  nextIndex=2
+		reply.XTerm, reply.XIndex, reply.XLen = -1, -1, len(rf.logs)
+		reply.Term = rf.currentTerm
+		reply.Success = false
+		return
+	}
+
+	// 该日志在 prevLogIndex 上的任期不能和 prevLogTerm 匹配，说明日志不一致
+	// 返回包含自己在冲突位置的任期存储的第一条日志
+	if rf.logs[args.PrevLogIndex].Term != args.PrevLogTerm {
+		conflictIndex, conflictTerm := -1, rf.logs[args.PrevLogIndex].Term
+		for i:=args.PrevLogIndex; i> rf.commitIndex;i--{
+			if rf.logs[i].Term != conflictTerm{
+				break
+			}
+			conflictIndex = i
+		}
+		reply.XTerm, reply.XIndex, reply.XLen = conflictTerm, conflictIndex, len(rf.logs)
 		reply.Term = rf.currentTerm
 		reply.Success = false
 		return
@@ -241,6 +317,7 @@ func (rf *Raft) SendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 func (rf *Raft) startElection() { //选举已在锁中，无需继续内部加锁
 	rf.votedFor = rf.me
 	rf.currentTerm++
+	rf.persist() // 有任期更新，需要持久化
 	rf.electionTimer.Reset(randomElectionTimeout())
 	Debug(dTimer, "S%d start election", rf.me)
 	voteGrantedCnt := 1 //先给自己投一票
@@ -276,9 +353,10 @@ func (rf *Raft) startElection() { //选举已在锁中，无需继续内部加�
 
 			// 对方任期大于自己任期，更新自己任期，重置投票，转换为Follower
 			if reply.Term > rf.currentTerm {
-				rf.state = Follower
 				rf.currentTerm = reply.Term
 				rf.votedFor = noVote
+				rf.persist() // 持久化
+				rf.state = Follower
 			} else if reply.Term == rf.currentTerm && rf.state == Candidate {
 				// 如果对方任期等于自己任期，并且自己是Candidate，则收集投票
 				if reply.VoteGranted {
@@ -351,6 +429,7 @@ func (rf *Raft) broadcastHeartbeat() {
 			if reply.Term > rf.currentTerm {
 				rf.currentTerm = reply.Term
 				rf.state = Follower
+				rf.persist() // 持久化
 				return
 			}
 			// 心跳成功或日志复制成功
@@ -360,11 +439,8 @@ func (rf *Raft) broadcastHeartbeat() {
 
 				//超过半数节点追加成功，也就是已提交，并且还是leader，那么就可以应用当前任期里的日志到状态机里。
 				rf.checkAndCommitLogs()
-			} else { //失败，减小nextIndex重试
-				rf.nextIndex[server]--
-				if rf.nextIndex[server] < 1 {
-					rf.nextIndex[server] = 1
-				}
+			} else { //失败，由逐一减小尝试改为快速定位nextIndex
+				rf.findNextIndex(i, reply)
 			}
 		}(i)
 	}
@@ -391,6 +467,33 @@ func (rf *Raft) checkAndCommitLogs() {
 		rf.commitIndex = N
 		rf.cond.Signal() //通知applierEvent应用日志
 	}
+}
+
+// 快速定位nextIndex
+func (rf *Raft) findNextIndex(peer int, reply *AppendEntriesReply) {
+	// Case 3: follower's log is too short:
+	// Follower落后leader日志时
+	if reply.XTerm == -1 && reply.XIndex == -1 {
+		rf.nextIndex[peer] = reply.XLen
+		return
+	}
+
+	flag := false
+	// Case 2: leader has XTerm，即Follower没落后但冲突
+	// Follower返回在发现不一致后的当前任期中存储的第一条日志
+	// Leader在其日志中搜索第一个条目任期等于conflictTerm的索引，回退后再复制
+	for i, entry := range rf.logs {
+		if entry.Term == reply.XTerm {
+			flag = true
+			rf.nextIndex[peer] = i
+		}
+	}
+
+	// leader doesn't have XTerm，即落后的节点成了leader，直接nextIndex = conflictIndex进行覆盖
+	if !flag {
+		rf.nextIndex[peer] = reply.XIndex
+	}
+
 }
 
 // 应用日志到状态机
@@ -488,6 +591,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Cmd:  command,
 		Term: rf.currentTerm,
 	})
+
+	rf.persist() //持久化
 
 	rf.matchIndex[rf.me] = rf.lastLogIndex()
 	rf.nextIndex[rf.me] = len(rf.logs)
