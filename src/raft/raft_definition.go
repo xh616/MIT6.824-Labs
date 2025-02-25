@@ -3,6 +3,7 @@ package raft
 import (
 	"math/rand"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"6.5840/labrpc"
@@ -18,15 +19,15 @@ import (
 // snapshots) on the applyCh, but set CommandValid to false for these
 // other uses.
 type ApplyMsg struct {
-	CommandValid bool
+	CommandValid bool //命令是否有效
 	Command      interface{}
-	CommandIndex int
+	CommandIndex int // 命令索引
 
 	// For 3D:
-	SnapshotValid bool
-	Snapshot      []byte
-	SnapshotTerm  int
-	SnapshotIndex int
+	SnapshotValid bool   // 快照是否有效
+	Snapshot      []byte //快照
+	SnapshotTerm  int    //快照的任期
+	SnapshotIndex int    //快照的索引
 }
 
 // A Go object implementing a single Raft peer.
@@ -61,6 +62,12 @@ type Raft struct {
 	cond         *sync.Cond    // 用于通知其他 goroutine的条件变量
 	applyMsg     chan ApplyMsg // 已提交日志需要被应用到状态机里
 	addLogSignal chan struct{} // 提醒leader新增log的信号，通过给channel传一个struct{}{}即可唤醒
+
+	// 3D
+	// 持久化的过程中，需要保证最新的快照和最新的raft持久化状态，一起持久化，保证原子性.
+	snapshot             []byte      // 总是保存最新的快照
+	lastIncludedIndex    int         // 快照替换的最后一条日志记录的索引（快照点）
+	replicatePreSnapshot atomic.Bool // 控制日志复制优先于快照安装进入applyCh
 }
 
 // LogEntry
@@ -124,7 +131,7 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term    int  // 此节点的任期。假如 Leader 发现 Follower 的任期高于自己，则会放弃 Leader 身份并更新自己的任期。
 	Success bool // 此节点是否认同leader的心跳
- 
+
 	// 一旦Follower进行日志一致性检测发现不一致之后，在响应 leader 请求中包含自己在这个任期存储的第一条日志。
 	XTerm  int //Follower发现与leader日志不一致时的任期（如果存在的话）
 	XIndex int //具有该任期的第一个日志的索引（如果存在的话）
@@ -136,6 +143,23 @@ type PersistentStatus struct {
 	Logs        []LogEntry
 	CurrentTerm int
 	VotedFor    int
+
+	// 3D
+	LastIncludedIndex int // 快照替换的最后一条日志记录的索引
+	LastIncludedTerm  int // 快照替换的最后一条日志记录的任期
+}
+
+// 要求发送整个快照到单个 InstallSnapshot RPC，不分片
+type InstallSnapshotArgs struct {
+	Term              int    // Leader的任期
+	LeaderId          int    // Leader的任期的 ID，以便于跟随者重定向请求
+	LastIncludedIndex int    // 快照中包含的最后日志条目的索引值
+	LastIncludedTerm  int    // 快照中包含的最后日志条目的任期号
+	Data              []byte // 快照
+}
+
+type InstallSnapshotReply struct {
+	Term int // 当前任期号（currentTerm），便于Leader的任期更新自己
 }
 
 // the service or tester wants to create a Raft server. the ports
@@ -170,6 +194,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		matchIndex:   make([]int, len(peers)),
 		applyMsg:     applyCh,
 		addLogSignal: make(chan struct{}),
+
+		//3D
+		lastIncludedIndex: 0,  //快照点
 	}
 	// 初始化条件变量，控制applier协程和其他协程之间的通信
 	rf.cond = sync.NewCond(&rf.mu)
