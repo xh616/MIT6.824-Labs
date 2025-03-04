@@ -6,7 +6,7 @@ https://pdos.csail.mit.edu/6.824/labs/lab-mr.html
 
 ## 原理视频
 
-<video src="Lab1 MapReduce.assets/MapReduce.mp4" />
+https://github.com/user-attachments/assets/0126e34e-6ee1-47c6-86bc-ffc475b2e959
 
 ## Paper中MapReduce模型中的Fault Tolerance机制
 
