@@ -60,3 +60,10 @@ func (rf *Raft) realLogLen() int {
 func (rf *Raft) isLogUpToDate(lastLogTerm, lastLogIndex int) bool {
 	return lastLogTerm > rf.lastLogTerm() || (lastLogTerm == rf.lastLogTerm() && lastLogIndex >= rf.lastLogIndex())
 }
+
+// Debug用，获取当前的状态
+func(rf * Raft) GetStringState() string{
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	return StateToString(rf.state)
+}

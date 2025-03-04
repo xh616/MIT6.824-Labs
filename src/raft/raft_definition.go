@@ -85,7 +85,7 @@ const (
 
 const noVote = -1
 
-// 广播心跳时间<<选举超时时间
+// 心跳时间<选举超时时间
 func HeartBeatTimeout() time.Duration {
 	return 50 * time.Millisecond
 }
